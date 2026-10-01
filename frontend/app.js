@@ -416,23 +416,29 @@ async function uploadPage() {
       </div>
 
       <div class="auth-card" style="max-width:100%">
-        <form id="upload-form">
-          <div class="dropzone" id="dropzone">
+        <form id="upload-form" novalidate>
+          <label for="file-input" class="dropzone" id="dropzone" style="display:block;cursor:pointer">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
               <path d="M12 12v9"/>
               <path d="m16 16-4-4-4 4"/>
             </svg>
-            <div class="dropzone-title">Click to browse or drag & drop file</div>
-            <div class="dropzone-desc">Any document, image, or archive (up to 25 MB)</div>
-            <input type="file" id="file-input" style="display:none" required>
-            <div id="file-pill" class="selected-file-pill" style="display:none">
-              <span id="file-pill-name"></span>
-              <button type="button" id="remove-file" class="btn-icon" style="background:transparent;border:none;padding:2px;color:inherit">✕</button>
+            <div class="dropzone-title">Click to choose a file, or drag & drop here</div>
+            <div class="dropzone-desc">Supports all file types (large files up to 50 GB)</div>
+            <div style="margin-top:0.75rem">
+              <span class="btn-primary btn-sm" style="pointer-events:none;display:inline-flex;align-items:center;gap:0.4rem">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
+                Browse Files
+              </span>
             </div>
-          </div>
+            <input type="file" id="file-input" style="position:absolute;left:-9999px;opacity:0">
+            <div id="file-pill" class="selected-file-pill" style="display:none;margin-top:1rem;cursor:default" onclick="event.stopPropagation()">
+              <span id="file-pill-name" style="word-break:break-all"></span>
+              <button type="button" id="remove-file" class="btn-icon" style="background:transparent;border:none;padding:2px;color:inherit;cursor:pointer" title="Remove file">✕</button>
+            </div>
+          </label>
 
-          <div class="form-group">
+          <div class="form-group" style="margin-top:1.5rem">
             <label for="pass">Encryption Passphrase</label>
             <input type="password" id="pass" required minlength="6" placeholder="Choose a secure passphrase">
             <p class="input-hint">Your passphrase derives a local 256-bit AES key. It is never transmitted to the server.</p>
@@ -665,12 +671,6 @@ function setupUploadHandlers() {
 
   let selectedFile = null;
 
-  dropzone.onclick = e => {
-    if (e.target !== removeFileBtn && !removeFileBtn.contains(e.target)) {
-      fileInput.click();
-    }
-  };
-
   ['dragenter', 'dragover'].forEach(name => {
     dropzone.addEventListener(name, e => {
       e.preventDefault();
@@ -699,11 +699,14 @@ function setupUploadHandlers() {
 
   function setFile(f) {
     selectedFile = f;
-    filePillName.textContent = `${f.name} (${formatBytes(f.size)})`;
+    filePillName.textContent = `✓ ${f.name} (${formatBytes(f.size)})`;
     filePill.style.display = 'flex';
+    statusBox.className = 'status-box';
+    statusBox.textContent = '';
   }
 
   removeFileBtn.onclick = e => {
+    e.preventDefault();
     e.stopPropagation();
     selectedFile = null;
     fileInput.value = '';
@@ -713,28 +716,31 @@ function setupUploadHandlers() {
   form.onsubmit = async e => {
     e.preventDefault();
     if (!selectedFile) {
-      alert('Please select a file to upload');
+      statusBox.className = 'status-box error';
+      statusBox.textContent = 'Please select a file to upload first.';
       return;
     }
     const pass = document.getElementById('pass').value;
     if (!pass || pass.length < 6) {
-      alert('Passphrase must be at least 6 characters');
+      statusBox.className = 'status-box error';
+      statusBox.textContent = 'Passphrase must be at least 6 characters.';
+      document.getElementById('pass').focus();
       return;
     }
 
     uploadBtn.disabled = true;
     statusBox.className = 'status-box info';
-    statusBox.textContent = '1/3 Encrypting file client-side with AES-256-GCM…';
+    statusBox.textContent = `1/3 Encrypting ${selectedFile.name} (${formatBytes(selectedFile.size)}) client-side…`;
 
     try {
       const encrypted = await encryptFile(selectedFile, pass);
 
-      statusBox.textContent = '2/3 Pinning encrypted blob to IPFS network…';
+      statusBox.textContent = '2/3 Streaming encrypted data to IPFS network node…';
       const fd = new FormData();
       fd.append('file', encrypted, selectedFile.name + '.ovenc');
       const ipfsRes = await api('/ipfs/add', { method: 'POST', body: fd });
 
-      statusBox.textContent = '3/3 Registering ownership on EVM contract & ledger…';
+      statusBox.textContent = '3/3 Registering file on EVM smart contract & ledger…';
       await api('/files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -747,7 +753,7 @@ function setupUploadHandlers() {
       });
 
       statusBox.className = 'status-box success';
-      statusBox.textContent = 'Upload complete! Stored on IPFS: ' + ipfsRes.cid;
+      statusBox.textContent = `Upload successful! Stored on IPFS (CID: ${ipfsRes.cid.slice(0, 12)}…)`;
       toast('File encrypted and uploaded to IPFS!');
       setTimeout(() => {
         view = 'vault';

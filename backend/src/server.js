@@ -7,7 +7,14 @@ const app=express(); app.use(cors()); app.use(express.json({limit:'2mb'}));
 const DB=path.join(__dirname,'../data.json');
 const readDB=()=>fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB,'utf8')):{users:[],files:[],events:[]};
 const writeDB=d=>fs.writeFileSync(DB,JSON.stringify(d,null,2));
-const upload=multer({storage:multer.memoryStorage(),limits:{fileSize:25*1024*1024}});
+const os=require('os');
+const uploadDir=path.join(os.tmpdir(),'oriovault-uploads');
+if(!fs.existsSync(uploadDir))fs.mkdirSync(uploadDir,{recursive:true});
+const storage=multer.diskStorage({
+  destination:(req,file,cb)=>cb(null,uploadDir),
+  filename:(req,file,cb)=>cb(null,`${uuid()}-${file.originalname}`)
+});
+const upload=multer({storage,limits:{fileSize:50*1024*1024*1024}}); // 50 GB limit
 
 async function initIPFS(){
   const {create}=await import('ipfs-http-client');
@@ -27,7 +34,18 @@ const auth=(req,res,next)=>{try{req.user=jwt.verify((req.headers.authorization||
 app.get('/api/health',async(req,res)=>{let ipfsOk=false;try{if(ipfs){const v=await ipfs.version();ipfsOk=!!v}}catch{}res.json({ok:true,ipfs:ipfsOk,blockchain:!!contract})});
 app.post('/api/auth/register',async(req,res)=>{const {username,password}=req.body||{};if(!username||!password||username.length<3||password.length<6)return res.status(400).json({error:'Username 3+ and password 6+'});let d=readDB();if(d.users.some(x=>x.username===username.toLowerCase()))return res.status(409).json({error:'Username already exists'});d.users.push({id:uuid(),username:username.toLowerCase(),password:await bcrypt.hash(password,12),createdAt:Date.now()});writeDB(d);res.json({message:'Account created'});});
 app.post('/api/auth/login',async(req,res)=>{const {username,password}=req.body||{},d=readDB(),u=d.users.find(x=>x.username===String(username||'').toLowerCase());if(!u||!(await bcrypt.compare(password||'',u.password)))return res.status(401).json({error:'Invalid credentials'});res.json({token:jwt.sign({id:u.id,username:u.username},process.env.JWT_SECRET||'dev-secret',{expiresIn:'8h'}),username:u.username});});
-app.post('/api/ipfs/add',auth,upload.single('file'),async(req,res)=>{if(!req.file)return res.status(400).json({error:'file required'});try{const r=await ipfs.add(req.file.buffer,{pin:true});res.json({cid:r.cid.toString(),size:r.size||req.file.size});}catch(e){res.status(503).json({error:'IPFS unavailable',detail:e.message})}});
+app.post('/api/ipfs/add',auth,upload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'file required'});
+  try{
+    const fileStream=fs.createReadStream(req.file.path);
+    const r=await ipfs.add(fileStream,{pin:true});
+    try{fs.unlinkSync(req.file.path)}catch{}
+    res.json({cid:r.cid.toString(),size:r.size||req.file.size});
+  }catch(e){
+    try{if(req.file&&req.file.path)fs.unlinkSync(req.file.path)}catch{}
+    res.status(503).json({error:'IPFS unavailable',detail:e.message});
+  }
+});
 app.post('/api/ipfs/add-json',auth,async(req,res)=>{try{const r=await ipfs.add(JSON.stringify(req.body),{pin:true});res.json({cid:r.cid.toString()})}catch(e){res.status(503).json({error:'IPFS unavailable',detail:e.message})}});
 app.get('/api/ipfs/:cid',async(req,res)=>{try{const chunks=[];for await(const c of ipfs.cat(req.params.cid))chunks.push(c);res.send(Buffer.concat(chunks))}catch(e){res.status(404).json({error:'CID not found'})}});
 app.post('/api/files',auth,async(req,res)=>{const {rootCid,name,mimeType,size,metadataCid,txHash}=req.body||{};if(!rootCid||!name)return res.status(400).json({error:'rootCid and name required'});let d=readDB();let chainTx=txHash||null;if(signer){try{const tx=await contract.registerFile(rootCid,name,mimeType||'application/octet-stream',Number(size||0));chainTx=tx.hash;await tx.wait()}catch(e){return res.status(502).json({error:'Blockchain transaction failed',detail:e.message})}}const f={id:uuid(),owner:req.user.username,rootCid,name,mimeType:mimeType||'application/octet-stream',size:Number(size||0),metadataCid:metadataCid||null,txHash:chainTx,createdAt:Date.now(),sharedWith:[]};d.files.push(f);d.events.push({type:'UPLOAD',fileId:f.id,by:req.user.username,txHash:f.txHash,at:Date.now()});writeDB(d);res.json(f)});
