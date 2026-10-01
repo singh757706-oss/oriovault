@@ -164,23 +164,30 @@ async function decryptFile(blob, password, fileName, mimeType) {
     ct
   );
 
-  const downloadBlob = new Blob([plain], { type: mimeType || 'application/octet-stream' });
+  const isPdf = fileName.toLowerCase().endsWith('.pdf') || (mimeType && mimeType.includes('pdf'));
+  const finalMime = isPdf ? 'application/pdf' : (mimeType || 'application/octet-stream');
+  const downloadBlob = new Blob([plain], { type: finalMime });
   const url = URL.createObjectURL(downloadBlob);
-  const a = document.createElement('a');
-  a.style.display = 'none';
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
 
-  setTimeout(() => {
-    a.remove();
-    URL.revokeObjectURL(url);
-  }, 30000);
+  // Attempt automatic download
+  try {
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.setAttribute('download', fileName);
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 1000);
+  } catch (e) {
+    console.warn('Programmatic download trigger failed, falling back to manual link:', e);
+  }
+
+  return { plain, url, blob: downloadBlob, isPdf, byteLength: plain.byteLength };
 }
 
 /* ================= DECRYPT MODAL ================= */
 function showDecryptModal(cid, fileName, mimeType) {
+  let cachedEncryptedBlob = null;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
@@ -194,21 +201,23 @@ function showDecryptModal(cid, fileName, mimeType) {
       <p style="font-size:0.9rem;color:var(--text-muted);margin-bottom:1.2rem">
         File: <b style="color:var(--text-main)">${esc(fileName)}</b>
       </p>
-      <form id="decrypt-form">
-        <div class="form-group">
-          <label for="decrypt-pass">Decryption Passphrase</label>
-          <input id="decrypt-pass" type="password" required autofocus placeholder="Enter passphrase used at upload">
-          <p class="input-hint">AES-256-GCM authenticated client-side decryption</p>
-        </div>
-        <div class="row" style="display:flex;gap:0.6rem;justify-content:flex-end;margin-top:1.5rem">
-          <button type="button" id="modal-cancel">Cancel</button>
-          <button type="submit" class="btn-primary" id="modal-submit">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-            Decrypt & Save
-          </button>
-        </div>
-        <div id="decrypt-status" class="status-box"></div>
-      </form>
+      <div id="modal-body">
+        <form id="decrypt-form">
+          <div class="form-group">
+            <label for="decrypt-pass">Decryption Passphrase</label>
+            <input id="decrypt-pass" type="password" required autofocus placeholder="Enter passphrase used when uploading">
+            <p class="input-hint">AES-256-GCM authenticated client-side decryption</p>
+          </div>
+          <div class="row" style="display:flex;gap:0.6rem;justify-content:flex-end;margin-top:1.5rem">
+            <button type="button" id="modal-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="modal-submit">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+              Decrypt & Save
+            </button>
+          </div>
+          <div id="decrypt-status" class="status-box"></div>
+        </form>
+      </div>
     </div>
   `;
 
@@ -219,10 +228,18 @@ function showDecryptModal(cid, fileName, mimeType) {
   const submitBtn = overlay.querySelector('#modal-submit');
   const cancelBtn = overlay.querySelector('#modal-cancel');
   const closeBtn = overlay.querySelector('#modal-close');
+  const modalBody = overlay.querySelector('#modal-body');
 
   passInput.focus();
 
-  const close = () => overlay.remove();
+  let activeBlobUrl = null;
+  const close = () => {
+    if (activeBlobUrl) {
+      setTimeout(() => URL.revokeObjectURL(activeBlobUrl), 30000);
+    }
+    overlay.remove();
+  };
+
   cancelBtn.onclick = close;
   closeBtn.onclick = close;
   overlay.onclick = e => { if (e.target === overlay) close(); };
@@ -235,30 +252,62 @@ function showDecryptModal(cid, fileName, mimeType) {
     submitBtn.disabled = true;
     cancelBtn.disabled = true;
     statusBox.className = 'status-box info';
-    statusBox.textContent = '1/3 Fetching encrypted object from IPFS node…';
 
     try {
-      const res = await fetch(`${API}/ipfs/${encodeURIComponent(cid)}`);
-      if (!res.ok) throw new Error(`Could not fetch file from IPFS (status ${res.status})`);
-      const blob = await res.blob();
+      if (!cachedEncryptedBlob) {
+        statusBox.textContent = '1/3 Fetching encrypted file from IPFS network…';
+        const res = await fetch(`${API}/ipfs/${encodeURIComponent(cid)}`);
+        if (!res.ok) throw new Error(`Could not fetch file from IPFS (status ${res.status})`);
+        cachedEncryptedBlob = await res.blob();
+      }
 
       statusBox.textContent = '2/3 Deriving PBKDF2 key and decrypting AES-256-GCM…';
-      await decryptFile(blob, pass, fileName, mimeType);
+      const result = await decryptFile(cachedEncryptedBlob, pass, fileName, mimeType);
+      activeBlobUrl = result.url;
 
-      statusBox.className = 'status-box success';
-      statusBox.textContent = '3/3 Decrypted successfully! Download started.';
-      toast(`Downloaded "${fileName}"`);
-      setTimeout(close, 1200);
+      // Render success state with direct download and view buttons
+      modalBody.innerHTML = `
+        <div style="text-align:center;padding:1rem 0">
+          <div style="width:52px;height:52px;border-radius:50%;background:var(--success-light);color:var(--success);display:flex;align-items:center;justify-content:center;margin:0 auto 1rem">
+            <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+          </div>
+          <h4 style="font-size:1.15rem;font-weight:700;margin-bottom:0.35rem;color:var(--text-main)">Decryption Successful!</h4>
+          <p style="font-size:0.88rem;color:var(--text-muted);margin-bottom:1.5rem">
+            ${esc(fileName)} (${formatBytes(result.byteLength)}) is decrypted and ready.
+          </p>
+
+          <div style="display:flex;flex-direction:column;gap:0.75rem">
+            <a href="${result.url}" download="${esc(fileName)}" class="btn-primary" style="text-decoration:none;padding:0.75rem 1.25rem;font-size:0.95rem;justify-content:center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+              Click Here to Download ${result.isPdf ? 'PDF' : 'File'}
+            </a>
+            ${result.isPdf ? `
+              <a href="${result.url}" target="_blank" rel="noopener noreferrer" style="text-decoration:none">
+                <button type="button" style="width:100%;padding:0.65rem 1rem">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                  Open PDF in Browser Tab
+                </button>
+              </a>
+            ` : ''}
+            <button type="button" id="modal-done" style="margin-top:0.5rem">Done</button>
+          </div>
+        </div>
+      `;
+
+      overlay.querySelector('#modal-done').onclick = close;
+      toast(`Decrypted "${fileName}"!`);
     } catch (err) {
       console.error('Decryption failed:', err);
       submitBtn.disabled = false;
       cancelBtn.disabled = false;
       statusBox.className = 'status-box error';
       if (err.name === 'OperationError' || !err.message || err.message.includes('operation-specific')) {
-        statusBox.textContent = 'Decryption failed: Incorrect passphrase! Please check and try again.';
+        statusBox.textContent = 'Decryption failed: Incorrect passphrase! The key does not match this file. Please re-enter the passphrase used during upload.';
       } else {
         statusBox.textContent = 'Error: ' + err.message;
       }
+      passInput.focus();
+      passInput.select();
     }
   };
 }
