@@ -21,7 +21,7 @@
 - [Smart Contract Details](#-smart-contract-details)
 - [Environment Configuration](#-environment-configuration)
 - [API Reference](#-api-reference)
-- [Project Team](#-project-team)
+- [License](#-license)
 
 ---
 
@@ -241,15 +241,6 @@ struct FileRecord {
 | `POST` | `/api/files/:id/share` | Yes | Share a file with another user |
 | `GET` | `/api/events` | Yes | Retrieve immutable activity ledger |
 | `DELETE` | `/api/files/:id` | Yes | Mark a file as deleted |
-
----
-
-## 👥 Project Team
-
-- **Utsav Gond** — Frontend Architecture & UI/UX
-- **Suhas H** — Backend API & Services Integration
-- **Prashanth Erappa Shetteppanavar** — Blockchain & IPFS Architecture
-- **Shrihari M Mantur** — Security, Cryptography & Testing
 
 ---
 
